@@ -1,4 +1,5 @@
-# PyTorch深度学习超图神经网络 - 环境依赖
+# PyTorch深度学习超图神经网络 - snoRNA-Disease关联预测
+# HGNN-SDA 环境依赖
 
 # 核心深度学习框架
 torch>=2.0.0
@@ -18,11 +19,16 @@ seaborn>=0.12.0
 # 进度条
 tqdm>=4.62.0
 
+# RNA预训练模型（用于提取snoRNA序列特征）
+multimolecule>=0.1.0
+
 # 可选：如果使用GPU加速
 # CUDA 11.8+
 # cuDNN 8.0+
 
-# 安装说明：
+# ============================================================
+# 安装说明
+# ============================================================
 # 
 # 1. CPU版本（适合大多数情况）:
 #    pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
@@ -32,6 +38,10 @@ tqdm>=4.62.0
 #    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 #    pip install -r requirements.txt
 #
-# 3. Apple Silicon (M1/M2) Mac:
+# 3. Apple Silicon (M1/M2/M3) Mac:
 #    pip install torch torchvision
 #    pip install -r requirements.txt
+#
+# 4. RNAErnie模型下载（可选，用于序列特征提取）:
+#    模型会在首次运行时自动从HuggingFace下载
+#    或手动下载到本地后修改 script/extract_rnaernie_sno.py 中的路径
