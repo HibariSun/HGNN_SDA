@@ -227,7 +227,6 @@ def cross_validation(association_matrix, snorna_sim, disease_sim,
         print(f"测试集 - 正样本: {len(test_pos)}, 负样本: {len(test_neg)}")
 
         # === 2.1 为当前折构造“训练专用”的关联矩阵 ===
-        #      注意：这里只抹去「测试折中的正样本」，其余保持不变。
         train_assoc_matrix = association_matrix.copy().astype(np.float32)
         for (i, j) in test_pos:
             train_assoc_matrix[i, j] = 0.0

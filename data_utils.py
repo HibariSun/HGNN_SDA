@@ -36,16 +36,22 @@ class DataLoader:
 
     def load_all_data(self, alpha_snorna=None, alpha_disease=None):
         """
-        加载数据并计算GIPK, 同时与外部相似性矩阵做 SWF 融合
-
-        alpha_snorna / alpha_disease:
-            - 如果为 None，则使用 __init__ 里传入的默认值
-            - 如果仍为 None，则退回到“自动权重模式”（按均值算权重）
+        统一的数据加载接口
 
         返回:
-            association_matrix: 关联矩阵
-            snorna_sim_fused: 融合后的 snoRNA 相似性矩阵
-            disease_sim_fused: 融合后的 disease 相似性矩阵
+            association_matrix: [num_snorna, num_disease] 的 0/1 关联矩阵
+            snorna_sim_fused:   [num_snorna, num_snorna] 的 snoRNA 相似性
+            disease_sim_fused:  [num_disease, num_disease] 的 disease 相似性
+
+        当前设计:
+            - snoRNA: 先把 sno_p2p_smith + sno_rnaernie_cosine_sim 做 SNF 融合，
+                     得到一个 snoRNA 外部相似性矩阵 self._sno_external
+            - disease: 直接使用 disease_similarity.csv（你已经融合了 DO + MeSH）
+
+            - 然后用 SWF 做:
+                snorna_sim_fused  = alpha_snorna * GIPK + (1 - alpha_snorna) * 外部(SNF)
+                disease_sim_fused = alpha_disease * GIPK + (1 - alpha_disease) * 外部
+              如果你把 alpha_snorna / alpha_disease 设为 0，就是「完全不用 GIPK」。
         """
         print("\n[步骤 1] 加载数据并计算相似性...")
 
@@ -60,7 +66,7 @@ class DataLoader:
             print(f"    - Disease数量: {self._association_matrix.shape[1]}")
             print(f"    - 已知关联数量: {int(self._association_matrix.sum())}")
 
-            # 2. 基于关联矩阵计算 GIPK 相似性
+            # 2. 基于关联矩阵计算 GIPK（你现在如果不想用，只要后面 alpha=0 即可）
             gipk_calculator = GIPKCalculator(self._association_matrix, gamma_ratio=1.0)
             snorna_gipk = gipk_calculator.compute_gipk_snorna()
             disease_gipk = gipk_calculator.compute_gipk_disease()
@@ -70,23 +76,34 @@ class DataLoader:
 
             print("\n  ✓ GIPK 计算和归一化完成")
 
-            # 3. 加载外部相似性矩阵
-            sno_ext_path = os.path.join(self.data_path, "sno_p2p_smith.csv")
+            # 3. 加载外部相似性矩阵：sno 两个 + disease 一个
+            sno_smith_path = os.path.join(self.data_path, "sno_p2p_smith.csv")
+            sno_rna_path = os.path.join(self.data_path, "sno_rnaernie_cosine_sim.csv")
             dis_ext_path = os.path.join(self.data_path, "disease_similarity.csv")
 
-            self._external_available = os.path.exists(sno_ext_path) and os.path.exists(dis_ext_path)
+            self._external_available = (
+                    os.path.exists(sno_smith_path)
+                    and os.path.exists(sno_rna_path)
+                    and os.path.exists(dis_ext_path)
+            )
+
             if not self._external_available:
-                print("\n[警告] 未找到外部相似性文件 sno_p2p_smith.csv 或 disease_similarity.csv")
-                print("       将仅使用 GIPK 相似性。要启用 SWF 融合，请将两个文件放到 data/ 目录下。")
+                print("\n[警告] 未找到以下一个或多个外部相似性文件：")
+                print("       - sno_p2p_smith.csv")
+                print("       - sno_rnaernie_cosine_sim.csv")
+                print("       - disease_similarity.csv")
+                print("       将仅使用 GIPK 相似性。")
             else:
-                print("\n  ✓ 外部相似性文件已找到, 开始加载:")
-                sno_external = pd.read_csv(sno_ext_path, index_col=0).values.astype(np.float32)
+                print("\n  ✓ 外部相似性文件已找到, 开始加载并做 SNF 融合:")
+
+                sno_smith = pd.read_csv(sno_smith_path, index_col=0).values.astype(np.float32)
+                sno_rna = pd.read_csv(sno_rna_path, index_col=0).values.astype(np.float32)
                 disease_external = pd.read_csv(dis_ext_path, index_col=0).values.astype(np.float32)
 
                 # 形状检查
-                if sno_external.shape != self._snorna_gipk.shape:
+                if sno_smith.shape != self._snorna_gipk.shape or sno_rna.shape != self._snorna_gipk.shape:
                     raise ValueError(
-                        f"snoRNA 外部相似性矩阵形状为 {sno_external.shape}, "
+                        f"snoRNA 外部相似性矩阵形状为 {sno_smith.shape} / {sno_rna.shape}, "
                         f"但 GIPK 相似性为 {self._snorna_gipk.shape}, 请检查行列顺序是否一致。"
                     )
                 if disease_external.shape != self._disease_gipk.shape:
@@ -95,22 +112,34 @@ class DataLoader:
                         f"但 GIPK 相似性为 {self._disease_gipk.shape}, 请检查行列顺序是否一致。"
                     )
 
-                self._sno_external = self._normalize_similarity(sno_external)
-                self._disease_external = self._normalize_similarity(disease_external)
-        else:
-            print("  ✓ 使用缓存的关联矩阵与相似性（GIPK + 外部原始矩阵）")
+                # 先做一次简单归一化
+                sno_smith = self._normalize_similarity(sno_smith)
+                sno_rna = self._normalize_similarity(sno_rna)
+                disease_external = self._normalize_similarity(disease_external)
 
-        # ========== 每次调用都可以给不同 α ==========
+                # 用 SNF 融合两个 snoRNA 外部相似性
+                self._sno_external = self._snf_two_similarities(
+                    sno_smith, sno_rna, K=20, t=20, mu=0.5
+                )
+                # disease 外部相似性直接使用你融合好的 DO+MeSH
+                self._disease_external = disease_external
+
+                print("  ✓ SNF 融合完成: snoRNA 外部相似性 = SNF(smith, RNAErnie)")
+
+        else:
+            print("  ✓ 使用缓存的关联矩阵与相似性（GIPK + 外部矩阵）")
+
+        # ========== 每次调用可以传入不同的 alpha ==========
         if alpha_snorna is None:
             alpha_snorna = self.alpha_snorna
         if alpha_disease is None:
             alpha_disease = self.alpha_disease
 
-        # 没有外部相似性，就直接用 GIPK
+        # 当前你的需求：想完全不用 GIPK，就在 main.py / grid_search 里把 alpha 设为 0.0
         if (not self._external_available) or (self._sno_external is None) or (self._disease_external is None):
             snorna_sim_fused = self._snorna_gipk
             disease_sim_fused = self._disease_gipk
-            print("\n  ✓ 使用 GIPK 相似性（未进行 SWF 融合）")
+            print("\n  ✓ 使用 GIPK 相似性（未进行外部融合）")
         else:
             snorna_sim_fused = self._swf_fusion(
                 self._snorna_gipk, self._sno_external,
@@ -121,7 +150,7 @@ class DataLoader:
                 name="Disease", alpha=alpha_disease
             )
 
-            print("\n  ✓ SWF 融合完成:")
+            print("\n  ✓ 相似性融合完成:")
             print(f"    - snoRNA 相似性矩阵形状: {snorna_sim_fused.shape}")
             print(f"    - Disease 相似性矩阵形状: {disease_sim_fused.shape}")
 
@@ -130,6 +159,70 @@ class DataLoader:
             snorna_sim_fused.astype(np.float32),
             disease_sim_fused.astype(np.float32)
         )
+
+    def _snf_two_similarities(self, S1, S2, K=20, t=20, mu=0.5):
+        """
+        使用一个简化版的 SNF 算法，把两个相似性矩阵 S1 / S2 融合成一个矩阵。
+
+        参数:
+            S1, S2: 形状 [N, N] 的相似性矩阵（建议先做过 _normalize_similarity）
+            K: 每个样本保留的近邻数
+            t: 迭代次数
+            mu: 对弱边的抑制程度 (0<mu<=1, 越小越强化大边)
+
+        返回:
+            fused: 形状 [N, N] 的融合后相似性矩阵，已归一化到 [0, 1]，对角线为 1
+        """
+
+        def _make_affinity(S):
+            """从相似性 S 构造 KNN 的转移矩阵 P"""
+            N = S.shape[0]
+            # 去掉自环
+            S = S - np.diag(np.diag(S))
+
+            W = np.zeros_like(S, dtype=np.float32)
+            K_eff = min(K, N - 1)
+            for i in range(N):
+                # 取每一行最大的 K 个近邻
+                idx = np.argsort(S[i])[-K_eff:]
+                W[i, idx] = S[i, idx]
+
+            # 对称化
+            W = (W + W.T) / 2.0
+
+            # 变成转移矩阵 P
+            row_sum = W.sum(axis=1, keepdims=True)
+            row_sum[row_sum == 0] = 1.0
+            P = W / (2.0 * row_sum)
+            np.fill_diagonal(P, 0.5)
+            return P
+
+        # 先构造两个网络的初始转移矩阵
+        P1 = _make_affinity(S1)
+        P2 = _make_affinity(S2)
+        P_list = [P1, P2]
+
+        # 迭代信息扩散
+        for _ in range(t):
+            new_list = []
+            for i in range(2):
+                other = P_list[1 - i]  # 只有两个网络时，另一个就是 "other"
+                P_bar = other
+
+                # 信息扩散
+                P_new = P_list[i] @ P_bar @ P_list[i].T
+                if mu != 1.0:
+                    P_new = np.power(P_new, mu)
+
+                # 重新构造 KNN + 归一化
+                P_new = _make_affinity(P_new)
+                new_list.append(P_new)
+
+            P_list = new_list
+
+        fused = (P_list[0] + P_list[1]) / 2.0
+        fused = self._normalize_similarity(fused)
+        return fused
 
     def _normalize_similarity(self, sim_matrix):
         """归一化相似性矩阵: 对称化 + 对角线设为 1 + 截断到 [0,1]"""

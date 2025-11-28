@@ -337,13 +337,50 @@ class TripleHypergraphNN(nn.Module):
         self.num_snorna = num_snorna
         self.num_disease = num_disease
 
-        # ===== 初始特征: 只使用关联矩阵 =====
+        # ===== 初始特征: 关联矩阵 + 预先相似性 =====
         assoc_tensor = torch.as_tensor(assoc_matrix, dtype=torch.float32)
 
-        # snoRNA节点初始特征: adj_index的每一行 [num_snorna, num_disease]
-        snorna_feat = assoc_tensor
-        # disease节点初始特征: adj_index的每一列(转置) [num_disease, num_snorna]
-        disease_feat = assoc_tensor.t()
+        # 预先相似性矩阵（已经在 DataLoader 里融合好了）
+        snorna_sim_tensor = torch.as_tensor(snorna_sim, dtype=torch.float32)
+        disease_sim_tensor = torch.as_tensor(disease_sim, dtype=torch.float32)
+
+        # 形状安全检查（防止行列顺序出错）
+        if snorna_sim_tensor.shape[0] != num_snorna or snorna_sim_tensor.shape[1] != num_snorna:
+            raise ValueError(
+                f"snoRNA 相似性矩阵形状为 {snorna_sim_tensor.shape}, "
+                f"但期望为 ({num_snorna}, {num_snorna})"
+            )
+        if disease_sim_tensor.shape[0] != num_disease or disease_sim_tensor.shape[1] != num_disease:
+            raise ValueError(
+                f"disease 相似性矩阵形状为 {disease_sim_tensor.shape}, "
+                f"但期望为 ({num_disease}, {num_disease})"
+            )
+        if assoc_tensor.shape != (num_snorna, num_disease):
+            raise ValueError(
+                f"关联矩阵形状为 {assoc_tensor.shape}, "
+                f"但期望为 ({num_snorna}, {num_disease})"
+            )
+
+        # snoRNA 节点初始特征: [ adj_index 的每一行 | SNF 融合后的 sno 相似性行 ]
+        #    维度: num_disease + num_snorna
+        snorna_feat = torch.cat(
+            [assoc_tensor, snorna_sim_tensor],
+            dim=1
+        )
+
+        # disease 节点初始特征: [ adj_index 的每一列(转置) | disease 相似性行 ]
+        #    维度: num_snorna + num_disease
+        disease_feat = torch.cat(
+            [assoc_tensor.t(), disease_sim_tensor],
+            dim=1
+        )
+
+        # 可学习的特征嵌入
+        self.snorna_features = nn.Parameter(snorna_feat, requires_grad=True)
+        self.disease_features = nn.Parameter(disease_feat, requires_grad=True)
+
+        snorna_in_dim = self.snorna_features.size(1)  # num_disease + num_snorna
+        disease_in_dim = self.disease_features.size(1)  # num_snorna + num_disease
 
         # 可学习的特征嵌入
         self.snorna_features = nn.Parameter(snorna_feat, requires_grad=True)
