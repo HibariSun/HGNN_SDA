@@ -37,15 +37,15 @@ def main():
     # k_disease_list = [10, 20, 30]
     # association_weight_list = [0.5, 0.8, 1.0]
 
-    alpha_snorna_list = [0.0]
-    alpha_disease_list = [0.0]
+    alpha_snorna_list = [0.7]
+    alpha_disease_list = [0.7]
     k_snorna_list = [20]
     k_disease_list = [30]
     association_weight_list = [0.8]
     # 训练相关参数
     n_splits = 5
     epochs = 300
-    lr = 0.0001
+    lr = 0.00001
     patience = 30
 
     # ====== 网格搜索 ======
