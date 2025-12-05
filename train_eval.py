@@ -155,6 +155,16 @@ def cross_validation(association_matrix, snorna_sim, disease_sim,
                      n_splits=5, epochs=200, lr=0.0005, patience=30,
                      use_association_edges=True, association_weight=0.5,
                      k_snorna=20, k_disease=20,
+                     # ===== 新增的超图参数 =====
+                     kmeans_clusters=50,
+                     kmeans_min_cluster_size=2,
+                     use_kmeans=True,
+                     use_neighbor=True,
+                     # ===== 模型参数 =====
+                     hidden_dims=None,
+                     num_heads=8,
+                     dropout=0.2,
+                     # =========================
                      data_loader=None,
                      alpha_snorna=None,
                      alpha_disease=None):
@@ -169,10 +179,16 @@ def cross_validation(association_matrix, snorna_sim, disease_sim,
       都只使用当前折的训练关联矩阵 train_assoc_matrix 重新计算，
       从而避免测试折中的边泄露进特征和超图结构。
     """
+    if hidden_dims is None:
+        hidden_dims = [512, 384, 256, 128, 64]
+    
     print(f"\n[步骤 3] 开始 {n_splits} 折交叉验证...")
     print("=" * 80)
     print(f"  超图参数: k_snorna={k_snorna}, k_disease={k_disease}, "
           f"association_weight={association_weight}")
+    print(f"  KMeans参数: clusters={kmeans_clusters}, min_size={kmeans_min_cluster_size}, "
+          f"enabled={use_kmeans}")
+    print(f"  Neighbor超图: enabled={use_neighbor}")
 
     # -------------------------------
     # 1. 划分 K 折（只基于完整关联矩阵的正样本位置）
@@ -226,7 +242,7 @@ def cross_validation(association_matrix, snorna_sim, disease_sim,
         print(f"训练集 - 正样本: {len(train_pos)}, 负样本: {len(train_neg)}")
         print(f"测试集 - 正样本: {len(test_pos)}, 负样本: {len(test_neg)}")
 
-        # === 2.1 为当前折构造“训练专用”的关联矩阵 ===
+        # === 2.1 为当前折构造"训练专用"的关联矩阵 ===
         train_assoc_matrix = association_matrix.copy().astype(np.float32)
         for (i, j) in test_pos:
             train_assoc_matrix[i, j] = 0.0
@@ -259,7 +275,7 @@ def cross_validation(association_matrix, snorna_sim, disease_sim,
                 disease_sim_fold = data_loader._normalize_similarity(disease_gipk_fold)
         else:
             # 回退到旧逻辑：直接使用外部传入的 snorna_sim / disease_sim
-            # 这种情况下仍然存在“用完整关联矩阵算特征”的数据泄露风险，
+            # 这种情况下仍然存在"用完整关联矩阵算特征"的数据泄露风险，
             # 但为了兼容老代码，这里不做强制修改。
             snorna_sim_fold = snorna_sim
             disease_sim_fold = disease_sim
@@ -270,7 +286,12 @@ def cross_validation(association_matrix, snorna_sim, disease_sim,
             k_snorna=k_snorna,
             k_disease=k_disease,
             use_association_edges=use_association_edges,
-            association_weight=association_weight
+            association_weight=association_weight,
+            # 新增的 KMeans 参数
+            kmeans_clusters=kmeans_clusters,
+            kmeans_min_cluster_size=kmeans_min_cluster_size,
+            use_kmeans=use_kmeans,
+            use_neighbor=use_neighbor
         )
 
 
@@ -281,9 +302,9 @@ def cross_validation(association_matrix, snorna_sim, disease_sim,
             snorna_sim=snorna_sim_fold,
             disease_sim=disease_sim_fold,
             assoc_matrix=train_assoc_matrix,
-            hidden_dims=[512, 384, 256, 128, 64],
-            num_heads=8,
-            dropout=0.2
+            hidden_dims=hidden_dims,
+            num_heads=num_heads,
+            dropout=dropout
         ).to(device)
 
         # 优化器、损失函数和学习率调度器
@@ -362,24 +383,57 @@ def cross_validation(association_matrix, snorna_sim, disease_sim,
     return fold_results, np.array(all_y_true), np.array(all_y_scores), all_fold_predictions
 
 
-# 网格搜索：对 (alpha_snorna, alpha_disease, k_snorna, k_disease, association_weight) 做搜索
+# 网格搜索：对所有超图相关参数做搜索
 def grid_search(
         data_loader,
+        # ===== 相似性融合参数 =====
         alpha_snorna_list,
         alpha_disease_list,
+        # ===== H_all (KNN+关联) 参数 =====
         k_snorna_list,
         k_disease_list,
         association_weight_list,
+        # ===== H_kmeans 参数 =====
+        kmeans_clusters_list=None,
+        kmeans_min_cluster_size_list=None,
+        use_kmeans_list=None,
+        # ===== H_neighbor 参数 =====
+        use_neighbor_list=None,
+        # ===== 训练参数 =====
         n_splits=5,
         epochs=200,
         lr=0.0005,
-        patience=30
+        patience=30,
+        # ===== 模型参数 =====
+        hidden_dims=None,
+        num_heads=8,
+        dropout=0.2
 ):
     """
+    扩展的网格搜索，支持三超图的所有参数。
+    
+    新增参数:
+        kmeans_clusters_list: KMeans 聚类数列表，如 [30, 50, 80]
+        kmeans_min_cluster_size_list: KMeans 最小簇大小列表，如 [2, 3, 5]
+        use_kmeans_list: 是否使用 KMeans 超图，如 [True, False]
+        use_neighbor_list: 是否使用邻域超图，如 [True, False]
+    
     返回：
         best_config: 最优配置（以 mean AUPR 为标准）
         best_fold_results, best_y_true, best_y_scores, best_fold_predictions: 对应最优配置的结果
     """
+    # 设置默认值
+    if kmeans_clusters_list is None:
+        kmeans_clusters_list = [50]
+    if kmeans_min_cluster_size_list is None:
+        kmeans_min_cluster_size_list = [2]
+    if use_kmeans_list is None:
+        use_kmeans_list = [True]
+    if use_neighbor_list is None:
+        use_neighbor_list = [True]
+    if hidden_dims is None:
+        hidden_dims = [512, 384, 256, 128, 64]
+    
     results = []
     best_config = None
     best_mean_aupr = -1.0
@@ -388,17 +442,32 @@ def grid_search(
     best_y_scores = None
     best_fold_predictions = None
 
+    # 计算总组合数
     total_combinations = (
             len(alpha_snorna_list)
             * len(alpha_disease_list)
             * len(k_snorna_list)
             * len(k_disease_list)
             * len(association_weight_list)
+            * len(kmeans_clusters_list)
+            * len(kmeans_min_cluster_size_list)
+            * len(use_kmeans_list)
+            * len(use_neighbor_list)
     )
     comb_id = 0
 
-    print("\n[网格搜索] 开始网格搜索超参数...")
+    print("\n[网格搜索] 开始扩展网格搜索超参数...")
     print(f"  总组合数: {total_combinations}")
+    print(f"  搜索空间:")
+    print(f"    - alpha_snorna: {alpha_snorna_list}")
+    print(f"    - alpha_disease: {alpha_disease_list}")
+    print(f"    - k_snorna: {k_snorna_list}")
+    print(f"    - k_disease: {k_disease_list}")
+    print(f"    - association_weight: {association_weight_list}")
+    print(f"    - kmeans_clusters: {kmeans_clusters_list}")
+    print(f"    - kmeans_min_cluster_size: {kmeans_min_cluster_size_list}")
+    print(f"    - use_kmeans: {use_kmeans_list}")
+    print(f"    - use_neighbor: {use_neighbor_list}")
 
     for alpha_s in alpha_snorna_list:
         for alpha_d in alpha_disease_list:
@@ -414,66 +483,88 @@ def grid_search(
             for k_s in k_snorna_list:
                 for k_d in k_disease_list:
                     for assoc_w in association_weight_list:
-                        comb_id += 1
-                        print(f"\n>>> 组合 {comb_id}/{total_combinations}: "
-                              f"k_snorna={k_s}, k_disease={k_d}, association_weight={assoc_w}")
+                        for km_clusters in kmeans_clusters_list:
+                            for km_min_size in kmeans_min_cluster_size_list:
+                                for use_km in use_kmeans_list:
+                                    for use_nb in use_neighbor_list:
+                                        comb_id += 1
+                                        print(f"\n>>> 组合 {comb_id}/{total_combinations}:")
+                                        print(f"    k_snorna={k_s}, k_disease={k_d}, assoc_w={assoc_w}")
+                                        print(f"    kmeans: clusters={km_clusters}, min_size={km_min_size}, enabled={use_km}")
+                                        print(f"    neighbor: enabled={use_nb}")
 
-                        fold_results, all_y_true, all_y_scores, fold_predictions = cross_validation(
-                            association_matrix=association_matrix,
-                            snorna_sim=snorna_sim,
-                            disease_sim=disease_sim,
-                            n_splits=n_splits,
-                            epochs=epochs,
-                            lr=lr,
-                            patience=patience,
-                            use_association_edges=True,
-                            association_weight=assoc_w,
-                            k_snorna=k_s,
-                            k_disease=k_d,
-                            # 新增：把 DataLoader 和当前 α 传进去，
-                            # 让 cross_validation 能在每一折用训练关联矩阵重算 GIPK+SWF
-                            data_loader=data_loader,
-                            alpha_snorna=alpha_s,
-                            alpha_disease=alpha_d,
-                        )
+                                        fold_results, all_y_true, all_y_scores, fold_predictions = cross_validation(
+                                            association_matrix=association_matrix,
+                                            snorna_sim=snorna_sim,
+                                            disease_sim=disease_sim,
+                                            n_splits=n_splits,
+                                            epochs=epochs,
+                                            lr=lr,
+                                            patience=patience,
+                                            use_association_edges=True,
+                                            association_weight=assoc_w,
+                                            k_snorna=k_s,
+                                            k_disease=k_d,
+                                            # 新增的超图参数
+                                            kmeans_clusters=km_clusters,
+                                            kmeans_min_cluster_size=km_min_size,
+                                            use_kmeans=use_km,
+                                            use_neighbor=use_nb,
+                                            # 模型参数
+                                            hidden_dims=hidden_dims,
+                                            num_heads=num_heads,
+                                            dropout=dropout,
+                                            # DataLoader 和 alpha
+                                            data_loader=data_loader,
+                                            alpha_snorna=alpha_s,
+                                            alpha_disease=alpha_d,
+                                        )
 
-                        aucs = [r['auc'] for r in fold_results]
-                        auprs = [r['aupr'] for r in fold_results]
-                        mean_auc = float(np.mean(aucs))
-                        mean_aupr = float(np.mean(auprs))
-                        std_auc = float(np.std(aucs))
-                        std_aupr = float(np.std(auprs))
+                                        aucs = [r['auc'] for r in fold_results]
+                                        auprs = [r['aupr'] for r in fold_results]
+                                        mean_auc = float(np.mean(aucs))
+                                        mean_aupr = float(np.mean(auprs))
+                                        std_auc = float(np.std(aucs))
+                                        std_aupr = float(np.std(auprs))
 
-                        results.append({
-                            'alpha_snorna': alpha_s,
-                            'alpha_disease': alpha_d,
-                            'k_snorna': k_s,
-                            'k_disease': k_d,
-                            'association_weight': assoc_w,
-                            'mean_auc': mean_auc,
-                            'std_auc': std_auc,
-                            'mean_aupr': mean_aupr,
-                            'std_aupr': std_aupr
-                        })
+                                        results.append({
+                                            'alpha_snorna': alpha_s,
+                                            'alpha_disease': alpha_d,
+                                            'k_snorna': k_s,
+                                            'k_disease': k_d,
+                                            'association_weight': assoc_w,
+                                            'kmeans_clusters': km_clusters,
+                                            'kmeans_min_cluster_size': km_min_size,
+                                            'use_kmeans': use_km,
+                                            'use_neighbor': use_nb,
+                                            'mean_auc': mean_auc,
+                                            'std_auc': std_auc,
+                                            'mean_aupr': mean_aupr,
+                                            'std_aupr': std_aupr
+                                        })
 
-                        print(f"    -> 当前组合平均 AUC = {mean_auc:.4f}, "
-                              f"平均 AUPR = {mean_aupr:.4f}")
+                                        print(f"    -> 当前组合平均 AUC = {mean_auc:.4f}, "
+                                              f"平均 AUPR = {mean_aupr:.4f}")
 
-                        # 以 AUPR 为主要指标选最优配置
-                        if mean_aupr > best_mean_aupr:
-                            best_mean_aupr = mean_aupr
-                            best_config = {
-                                'alpha_snorna': alpha_s,
-                                'alpha_disease': alpha_d,
-                                'k_snorna': k_s,
-                                'k_disease': k_d,
-                                'association_weight': assoc_w
-                            }
-                            best_fold_results = fold_results
-                            best_y_true = all_y_true
-                            best_y_scores = all_y_scores
-                            best_fold_predictions = fold_predictions
-                            print("    *** 发现新的最优配置 (以 AUPR 为准) ***")
+                                        # 以 AUPR 为主要指标选最优配置
+                                        if mean_aupr > best_mean_aupr:
+                                            best_mean_aupr = mean_aupr
+                                            best_config = {
+                                                'alpha_snorna': alpha_s,
+                                                'alpha_disease': alpha_d,
+                                                'k_snorna': k_s,
+                                                'k_disease': k_d,
+                                                'association_weight': assoc_w,
+                                                'kmeans_clusters': km_clusters,
+                                                'kmeans_min_cluster_size': km_min_size,
+                                                'use_kmeans': use_km,
+                                                'use_neighbor': use_nb
+                                            }
+                                            best_fold_results = fold_results
+                                            best_y_true = all_y_true
+                                            best_y_scores = all_y_scores
+                                            best_fold_predictions = fold_predictions
+                                            print("    *** 发现新的最优配置 (以 AUPR 为准) ***")
 
     # 保存网格搜索结果
     os.makedirs('./outputs', exist_ok=True)

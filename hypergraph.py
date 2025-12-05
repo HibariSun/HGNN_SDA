@@ -133,7 +133,8 @@ class HypergraphConstructor:
     def _build_kmeans_hypergraph(self,
                                  n_clusters=50,
                                  random_state=42,
-                                 max_iter=300):
+                                 max_iter=300,
+                                 min_cluster_size=2):
         """
         使用 KMeans 在「所有节点」上做聚类，构造全局超图：
           - 把所有 snoRNA 和 disease 当成统一的一批节点来聚类；
@@ -149,6 +150,12 @@ class HypergraphConstructor:
               后 num_disease 维：disease_sim[j, :]        （和所有 disease 的相似度）
 
         这样 sno / disease 都在同一个特征空间里，自然可以被分到同一个簇。
+        
+        参数:
+            n_clusters: 聚类数量
+            random_state: 随机种子
+            max_iter: 最大迭代次数
+            min_cluster_size: 最小簇大小，小于此值的簇将被丢弃
         """
         num_nodes = self.num_snorna + self.num_disease
         feat_dim = self.num_snorna + self.num_disease
@@ -181,19 +188,18 @@ class HypergraphConstructor:
         )
         labels = kmeans.fit_predict(X)  # shape: [num_nodes]
 
-        # === 2.3 把每个簇变成一条超边，只保留“混合簇”（既有 sno 也有 disease） ===
+        # === 2.3 把每个簇变成一条超边，只保留"混合簇"（既有 sno 也有 disease） ===
         edge_node_lists = []
         for c in range(n_clusters):
             nodes = np.where(labels == c)[0]
-            if nodes.size < 2:  # 只过滤太小的簇
+            if nodes.size < min_cluster_size:  # 过滤太小的簇
                 continue
-            edge_node_lists.append(nodes)
 
             has_sno = np.any(nodes < self.num_snorna)
             has_dis = np.any(nodes >= self.num_snorna)
             if not (has_sno and has_dis):
                 # 如果这个簇里只有 sno 或只有 disease，就跳过，
-                # 强行保证 H_kmeans 的每条超边都“跨两类节点”
+                # 强行保证 H_kmeans 的每条超边都"跨两类节点"
                 continue
 
             edge_node_lists.append(nodes)
@@ -211,7 +217,7 @@ class HypergraphConstructor:
 
     def _build_neighbor_hypergraph(self):
         """
-        使用当前折的训练关联矩阵构造“邻域超图”：
+        使用当前折的训练关联矩阵构造"邻域超图"：
 
           - 对每个有训练关联的 snoRNA i：
               建一条超边 e_i，包含 sno_i 本人 + 所有与其相连的 disease
@@ -260,27 +266,33 @@ class HypergraphConstructor:
                                    # ↓↓↓ 以下是 KMeans 独立的参数 ↓↓↓
                                    kmeans_clusters=50,
                                    kmeans_max_iter=300,
-                                   kmeans_random_state=42):
+                                   kmeans_random_state=42,
+                                   kmeans_min_cluster_size=2,
+                                   # ↓↓↓ 超图启用开关 ↓↓↓
+                                   use_kmeans=True,
+                                   use_neighbor=True):
         """
         构建三个超图：
 
-          - H_all      : 原来的“相似性 + 关联”超图（KNN + 每条关联一条超边）
+          - H_all      : 原来的"相似性 + 关联"超图（KNN + 每条关联一条超边）
           - H_kmeans   : 全局 KMeans 聚类超图，每条超边连接 snoRNA 和 disease
           - H_neighbor : 邻域超图（每个节点的训练邻居集合）
 
         参数说明：
           k_snorna, k_disease          : 仍然只控制 KNN 部分（H_all 里的相似性超边）
-          use_association_edges        : 是否在 H_all 中加入“每条关联一条超边”
+          use_association_edges        : 是否在 H_all 中加入"每条关联一条超边"
           association_weight           : H_all 里关联超边的权重
           kmeans_clusters              : KMeans 聚类的簇数（= 超边数量上限）
           kmeans_max_iter              : KMeans 最大迭代次数
           kmeans_random_state          : KMeans 随机种子
+          kmeans_min_cluster_size      : KMeans 最小簇大小
+          use_kmeans                   : 是否启用 KMeans 超图
+          use_neighbor                 : 是否启用邻域超图
 
         返回:
           H_all, H_kmeans, H_neighbor
-          （为了兼容原来的 TripleHypergraphNN，这里仍然返回为 H_all, H_sno, H_dis，
-           只是语义变成：H_all = KNN+关联, H_sno = KMeans, H_dis = 邻域）
         """
+        num_nodes = self.num_snorna + self.num_disease
 
         # === 1) 原始的 KNN + 关联超图 ===
         H_all = self.construct_hypergraph(
@@ -291,20 +303,29 @@ class HypergraphConstructor:
         )
 
         # === 2) 全局 KMeans 超图（H_kmeans） ===
-        H_kmeans = self._build_kmeans_hypergraph(
-            n_clusters=kmeans_clusters,
-            random_state=kmeans_random_state,
-            max_iter=kmeans_max_iter
-        )
+        if use_kmeans:
+            H_kmeans = self._build_kmeans_hypergraph(
+                n_clusters=kmeans_clusters,
+                random_state=kmeans_random_state,
+                max_iter=kmeans_max_iter,
+                min_cluster_size=kmeans_min_cluster_size
+            )
+        else:
+            # 如果不使用，返回一个只有一条全连接超边的占位超图
+            H_kmeans = torch.ones((num_nodes, 1), dtype=torch.float32, device=device) * 0.1
+            print(f"  ✓ H_kmeans 已禁用，使用占位超图")
 
         # === 3) 邻域超图（H_neighbor） ===
-        H_neighbor = self._build_neighbor_hypergraph()
+        if use_neighbor:
+            H_neighbor = self._build_neighbor_hypergraph()
+        else:
+            # 如果不使用，返回一个只有一条全连接超边的占位超图
+            H_neighbor = torch.ones((num_nodes, 1), dtype=torch.float32, device=device) * 0.1
+            print(f"  ✓ H_neighbor 已禁用，使用占位超图")
 
         print(f"  ✓ 多超图构建完成: "
               f"H_all(KNN+关联)={tuple(H_all.shape)}, "
               f"H_kmeans={tuple(H_kmeans.shape)}, "
               f"H_neighbor={tuple(H_neighbor.shape)}")
 
-        # 为了不改动后面模型的接口，这里依然按照 H_all, H_sno, H_dis 的顺序返回
         return H_all, H_kmeans, H_neighbor
-
