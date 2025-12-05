@@ -371,7 +371,7 @@ class TripleHypergraphNN(nn.Module):
         # disease 节点初始特征: [ adj_index 的每一列(转置) | disease 相似性行 ]
         #    维度: num_snorna + num_disease
         disease_feat = torch.cat(
-            [assoc_tensor.t(), disease_sim_tensor],
+            [disease_sim_tensor, assoc_tensor.t()],
             dim=1
         )
 

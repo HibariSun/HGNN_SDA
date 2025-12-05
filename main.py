@@ -33,9 +33,9 @@ def main():
     # ====== 网格搜索空间======
     # alpha_snorna_list = [0.3, 0.5, 0.7]
     # alpha_disease_list = [0.3, 0.5, 0.7]
-    # k_snorna_list = [10, 20, 30]
-    # k_disease_list = [10, 20, 30]
-    # association_weight_list = [0.5, 0.8, 1.0]
+    # k_snorna_list = [10, 20, 30] # 10, 20, 30
+    # k_disease_list = [10, 20, 30] # 10, 20, 30
+    # association_weight_list = [0.8, 1.0] # 0.5, 0.8, 1.0
 
     alpha_snorna_list = [0.7]
     alpha_disease_list = [0.7]

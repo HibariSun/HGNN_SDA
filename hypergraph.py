@@ -5,6 +5,7 @@
 import numpy as np
 import torch
 from utils import device
+from sklearn.cluster import KMeans
 
 
 # 超图构造器）
@@ -129,19 +130,159 @@ class HypergraphConstructor:
 
         return knn_graph
 
-    def construct_multi_hypergraph(self, k_snorna=15, k_disease=15,
+    def _build_kmeans_hypergraph(self,
+                                 n_clusters=50,
+                                 random_state=42,
+                                 max_iter=300):
+        """
+        使用 KMeans 在「所有节点」上做聚类，构造全局超图：
+          - 把所有 snoRNA 和 disease 当成统一的一批节点来聚类；
+          - 每个簇形成一条超边；
+          - 只保留同时包含 snoRNA 和 disease 的簇（保证一条超边里两类节点都出现）。
+
+        特征设计（统一维度 = num_snorna + num_disease）：
+          - 对 snoRNA i：
+              前 num_snorna 维：snorna_sim[i, :]       （它和所有 sno 的相似度）
+              后 num_disease 维：association_matrix[i, :] （它和所有 disease 的关联）
+          - 对 disease j：
+              前 num_snorna 维：association_matrix[:, j]  （和所有 sno 的关联）
+              后 num_disease 维：disease_sim[j, :]        （和所有 disease 的相似度）
+
+        这样 sno / disease 都在同一个特征空间里，自然可以被分到同一个簇。
+        """
+        num_nodes = self.num_snorna + self.num_disease
+        feat_dim = self.num_snorna + self.num_disease
+
+        # === 2.1 构造所有节点的特征矩阵 X ===
+        X = np.zeros((num_nodes, feat_dim), dtype=np.float32)
+        A = self.association_matrix  # 当前折的训练关联矩阵（不会包含测试折的边）
+
+        # snoRNA 节点：索引 0 ~ num_snorna-1
+        for i in range(self.num_snorna):
+            # 前半部分：和所有 snoRNA 的相似度
+            X[i, :self.num_snorna] = self.snorna_sim[i]
+            # 后半部分：和所有 disease 的关联
+            X[i, self.num_snorna:] = A[i]
+
+        # disease 节点：索引 num_snorna ~ num_snorna+num_disease-1
+        for j in range(self.num_disease):
+            node_idx = self.num_snorna + j
+            # 前半部分：和所有 snoRNA 的关联（列向量）
+            X[node_idx, :self.num_snorna] = A[:, j]
+            # 后半部分：和所有 disease 的相似度
+            X[node_idx, self.num_snorna:] = self.disease_sim[j]
+
+        # === 2.2 在所有节点上做 KMeans 聚类 ===
+        kmeans = KMeans(
+            n_clusters=n_clusters,
+            random_state=random_state,
+            max_iter=max_iter,
+            n_init=10
+        )
+        labels = kmeans.fit_predict(X)  # shape: [num_nodes]
+
+        # === 2.3 把每个簇变成一条超边，只保留“混合簇”（既有 sno 也有 disease） ===
+        edge_node_lists = []
+        for c in range(n_clusters):
+            nodes = np.where(labels == c)[0]
+            if nodes.size < 2:  # 只过滤太小的簇
+                continue
+            edge_node_lists.append(nodes)
+
+            has_sno = np.any(nodes < self.num_snorna)
+            has_dis = np.any(nodes >= self.num_snorna)
+            if not (has_sno and has_dis):
+                # 如果这个簇里只有 sno 或只有 disease，就跳过，
+                # 强行保证 H_kmeans 的每条超边都“跨两类节点”
+                continue
+
+            edge_node_lists.append(nodes)
+
+        num_edges = len(edge_node_lists)
+        if num_edges == 0:
+            # 极端情况下（簇都被丢掉），返回一个空的超图矩阵
+            return torch.zeros((num_nodes, 0), dtype=torch.float32, device=device)
+
+        H = np.zeros((num_nodes, num_edges), dtype=np.float32)
+        for e_idx, nodes in enumerate(edge_node_lists):
+            H[nodes, e_idx] = 1.0   # 简单地把在该簇里的节点权重都设为 1
+
+        return torch.FloatTensor(H).to(device)
+
+    def _build_neighbor_hypergraph(self):
+        """
+        使用当前折的训练关联矩阵构造“邻域超图”：
+
+          - 对每个有训练关联的 snoRNA i：
+              建一条超边 e_i，包含 sno_i 本人 + 所有与其相连的 disease
+          - 对每个有训练关联的 disease j：
+              建一条超边 e'_j，包含 disease_j 本人 + 所有与其相连的 snoRNA
+          - 对没有任何训练关联的节点，不单独创建超边。
+
+        注意：self.association_matrix 是 train_assoc_matrix（K 折里传进来的），
+              测试折的正样本已经被置 0，因此不会泄露测试集信息。
+        """
+        num_nodes = self.num_snorna + self.num_disease
+        A = self.association_matrix
+        edge_node_lists = []
+
+        # 以 snoRNA 为中心的邻域超边
+        for i in range(self.num_snorna):
+            disease_indices = np.where(A[i] > 0)[0]
+            if disease_indices.size == 0:
+                continue
+            nodes = [i] + [self.num_snorna + j for j in disease_indices]
+            edge_node_lists.append(nodes)
+
+        # 以 disease 为中心的邻域超边
+        for j in range(self.num_disease):
+            sno_indices = np.where(A[:, j] > 0)[0]
+            if sno_indices.size == 0:
+                continue
+            nodes = [self.num_snorna + j] + list(sno_indices)
+            edge_node_lists.append(nodes)
+
+        num_edges = len(edge_node_lists)
+        if num_edges == 0:
+            return torch.zeros((num_nodes, 0), dtype=torch.float32, device=device)
+
+        H = np.zeros((num_nodes, num_edges), dtype=np.float32)
+        for e_idx, nodes in enumerate(edge_node_lists):
+            H[nodes, e_idx] = 1.0
+
+        return torch.FloatTensor(H).to(device)
+
+    def construct_multi_hypergraph(self,
+                                   k_snorna=15,
+                                   k_disease=15,
                                    use_association_edges=True,
-                                   association_weight=0.5):
+                                   association_weight=0.5,
+                                   # ↓↓↓ 以下是 KMeans 独立的参数 ↓↓↓
+                                   kmeans_clusters=50,
+                                   kmeans_max_iter=300,
+                                   kmeans_random_state=42):
         """
         构建三个超图：
-          - H_all    : 原来代码里的“相似性 + 关联”超图（保持完全兼容）
-          - H_sno    : 只包含 snoRNA KNN 相似性超边
-          - H_disease: 只包含 disease KNN 相似性超边
+
+          - H_all      : 原来的“相似性 + 关联”超图（KNN + 每条关联一条超边）
+          - H_kmeans   : 全局 KMeans 聚类超图，每条超边连接 snoRNA 和 disease
+          - H_neighbor : 邻域超图（每个节点的训练邻居集合）
+
+        参数说明：
+          k_snorna, k_disease          : 仍然只控制 KNN 部分（H_all 里的相似性超边）
+          use_association_edges        : 是否在 H_all 中加入“每条关联一条超边”
+          association_weight           : H_all 里关联超边的权重
+          kmeans_clusters              : KMeans 聚类的簇数（= 超边数量上限）
+          kmeans_max_iter              : KMeans 最大迭代次数
+          kmeans_random_state          : KMeans 随机种子
 
         返回:
-            H_all, H_sno, H_disease
+          H_all, H_kmeans, H_neighbor
+          （为了兼容原来的 TripleHypergraphNN，这里仍然返回为 H_all, H_sno, H_dis，
+           只是语义变成：H_all = KNN+关联, H_sno = KMeans, H_dis = 邻域）
         """
-        # 先用原来的函数构建 H_all（包含相似性 + 关联信息）
+
+        # === 1) 原始的 KNN + 关联超图 ===
         H_all = self.construct_hypergraph(
             k_snorna=k_snorna,
             k_disease=k_disease,
@@ -149,35 +290,21 @@ class HypergraphConstructor:
             association_weight=association_weight
         )
 
-        # 基于当前折的 GIPK 相似性构建 KNN 图
-        snorna_knn = self._build_knn_graph(self.snorna_sim, k_snorna)
-        disease_knn = self._build_knn_graph(self.disease_sim, k_disease)
+        # === 2) 全局 KMeans 超图（H_kmeans） ===
+        H_kmeans = self._build_kmeans_hypergraph(
+            n_clusters=kmeans_clusters,
+            random_state=kmeans_random_state,
+            max_iter=kmeans_max_iter
+        )
 
-        num_nodes = self.num_snorna + self.num_disease
-
-        # === H_sno：只用 snoRNA 相似性构造的超图 ===
-        # 每个 snoRNA 节点对应一条超边，超边里是它的 K 近邻
-        H_sno = np.zeros((num_nodes, self.num_snorna), dtype=np.float32)
-        for i in range(self.num_snorna):
-            neighbors = np.where(snorna_knn[i] > 0)[0]
-            for neighbor in neighbors:
-                # 这里只在 snoRNA 节点之间连边，因此行索引是 snoRNA 的编号
-                H_sno[neighbor, i] = snorna_knn[i, neighbor]
-
-        # === H_disease：只用 disease 相似性构造的超图 ===
-        H_dis = np.zeros((num_nodes, self.num_disease), dtype=np.float32)
-        for j in range(self.num_disease):
-            neighbors = np.where(disease_knn[j] > 0)[0]
-            for neighbor in neighbors:
-                # disease 节点在整体节点中的索引要加上 self.num_snorna 偏移
-                H_dis[self.num_snorna + neighbor, j] = disease_knn[j, neighbor]
-
-        H_sno = torch.FloatTensor(H_sno).to(device)
-        H_dis = torch.FloatTensor(H_dis).to(device)
+        # === 3) 邻域超图（H_neighbor） ===
+        H_neighbor = self._build_neighbor_hypergraph()
 
         print(f"  ✓ 多超图构建完成: "
-              f"H_all={tuple(H_all.shape)}, "
-              f"H_sno={tuple(H_sno.shape)}, "
-              f"H_dis={tuple(H_dis.shape)}")
+              f"H_all(KNN+关联)={tuple(H_all.shape)}, "
+              f"H_kmeans={tuple(H_kmeans.shape)}, "
+              f"H_neighbor={tuple(H_neighbor.shape)}")
 
-        return H_all, H_sno, H_dis
+        # 为了不改动后面模型的接口，这里依然按照 H_all, H_sno, H_dis 的顺序返回
+        return H_all, H_kmeans, H_neighbor
+
