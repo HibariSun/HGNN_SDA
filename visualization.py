@@ -191,21 +191,34 @@ class ResultVisualizer:
 def save_results(fold_results, output_dir='./outputs'):
     os.makedirs(output_dir, exist_ok=True)
 
+    # 每折的原始结果完整保存（包括 AUC/AUPR/Accuracy/Precision/Recall/F1/MCC）
     df_folds = pd.DataFrame(fold_results)
     df_folds.to_csv(f'{output_dir}/IMP_fold_results.csv', index=False)
 
-    aucs = [r['auc'] for r in fold_results]
-    auprs = [r['aupr'] for r in fold_results]
-
-    summary = {
-        'Metric': ['AUC', 'AUPR'],
-        'Mean': [np.mean(aucs), np.mean(auprs)],
-        'Std': [np.std(aucs), np.std(auprs)],
-        'Min': [np.min(aucs), np.min(auprs)],
-        'Max': [np.max(aucs), np.max(auprs)],
-        'Median': [np.median(aucs), np.median(auprs)]
+    # 需要做统计汇总的所有指标
+    metric_values = {
+        'AUC':      [r['auc']       for r in fold_results],
+        'AUPR':     [r['aupr']      for r in fold_results],
+        'Accuracy': [r['accuracy']  for r in fold_results],
+        'Precision':[r['precision'] for r in fold_results],
+        'Recall':   [r['recall']    for r in fold_results],
+        'F1':       [r['f1']        for r in fold_results],
+        'MCC':      [r['mcc']       for r in fold_results],
     }
-    df_summary = pd.DataFrame(summary)
+
+    summary_rows = []
+    for metric_name, values in metric_values.items():
+        values = np.array(values, dtype=float)
+        summary_rows.append({
+            'Metric': metric_name,
+            'Mean':   np.mean(values),
+            'Std':    np.std(values),
+            'Min':    np.min(values),
+            'Max':    np.max(values),
+            'Median': np.median(values),
+        })
+
+    df_summary = pd.DataFrame(summary_rows)
     df_summary.to_csv(f'{output_dir}/IMP_summary_statistics.csv', index=False)
 
     print(f"\n[步骤 5] 结果已保存到: {output_dir}/")

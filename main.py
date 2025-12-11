@@ -30,33 +30,31 @@ def main():
     # 初始化数据加载器（GIPK / 外部相似性会在第一次调用时计算并缓存）
     data_loader = DataLoader(data_path='./data/')
 
-    # ====== 网格搜索空间 ======
-    # 相似性融合参数
-    alpha_snorna_list = [0.5, 0.7]        # snoRNA 相似性中 GIPK 所占比例
-    alpha_disease_list = [0.5, 0.7]       # disease 相似性中 GIPK 所占比例
-    
-    # H_all (KNN + 关联超图) 参数
-    k_snorna_list = [15, 20, 30]          # snoRNA 的 K 近邻数量
-    k_disease_list = [15, 20, 30]         # disease 的 K 近邻数量
-    association_weight_list = [0.5, 0.8, 1.0]  # 关联超边的权重
-    
-    # H_kmeans (KMeans聚类超图) 参数
-    kmeans_clusters_list = [30, 50, 80]   # KMeans 聚类数量
-    kmeans_min_cluster_size_list = [2, 3] # 最小簇大小
-    use_kmeans_list = [True]              # 是否启用 KMeans 超图 (可以加 False 做消融实验)
-    
-    # H_neighbor (邻域超图) 参数
-    use_neighbor_list = [True]            # 是否启用邻域超图 (可以加 False 做消融实验)
-    
+    # # ====== 网格搜索空间 ======
+    # # 相似性融合参数
+    # alpha_snorna_list = [0.5, 0.7]  # snoRNA 相似性中 GIPK 所占比例
+    # alpha_disease_list = [0.5, 0.7]  # disease 相似性中 GIPK 所占比例
+    #
+    # # H_all (KNN + 关联超图) 参数
+    # k_snorna_list = [15, 20, 30]  # snoRNA 的 K 近邻数量
+    # k_disease_list = [15, 20, 30]  # disease 的 K 近邻数量
+    # association_weight_list = [0.5, 0.8, 1.0]  # 关联超边的权重
+    #
+    # # H_kmeans (KMeans聚类超图) 参数
+    # kmeans_clusters_list = [30, 50, 80]  # KMeans 聚类数量
+    # kmeans_min_cluster_size_list = [2, 3]  # 最小簇大小
+    # use_kmeans_list = [True]  # 是否启用 KMeans 超图 (可以加 False 做消融实验)
+    #
+    # # H_neighbor (邻域超图) 参数
+    # use_neighbor_list = [True]  # 是否启用邻域超图 (可以加 False 做消融实验)
+
     # 训练相关参数
     n_splits = 5
     epochs = 300
     lr = 0.00001
     patience = 30
 
-    # ====== 精简版网格搜索（用于快速测试） ======
-    # 如果想快速测试，可以取消下面的注释，使用更小的搜索空间
-    """
+    #  精简版网格搜索（用于快速测试）
     alpha_snorna_list = [0.7]
     alpha_disease_list = [0.7]
     k_snorna_list = [20]
@@ -66,7 +64,6 @@ def main():
     kmeans_min_cluster_size_list = [2]
     use_kmeans_list = [True]
     use_neighbor_list = [True]
-    """
 
     # ====== 网格搜索 ======
     best_config, fold_results, all_y_true, all_y_scores, fold_predictions = grid_search(
@@ -111,18 +108,33 @@ def main():
     print("  训练完成（使用网格搜索得到的最优超参数）")
     print("=" * 80)
 
-    # 性能评估
+    # 性能评估（本方法 K 折平均）
     avg_auc = np.mean([r['auc'] for r in fold_results])
     avg_aupr = np.mean([r['aupr'] for r in fold_results])
+    avg_acc = np.mean([r['accuracy'] for r in fold_results])
+    avg_prec = np.mean([r['precision'] for r in fold_results])
+    avg_rec = np.mean([r['recall'] for r in fold_results])
+    avg_f1 = np.mean([r['f1'] for r in fold_results])
+    avg_mcc = np.mean([r['mcc'] for r in fold_results])
 
-    print(f"\n 最优配置下的性能评估:")
-    print(f"  平均 AUC:  {avg_auc:.4f}")
-    print(f"  平均 AUPR: {avg_aupr:.4f}")
+    print(f"\n 最优配置下的性能评估（{n_splits}折平均）:")
+    print(f"  AUC      : {avg_auc:.4f}")
+    print(f"  AUPR     : {avg_aupr:.4f}")
+    print(f"  Accuracy : {avg_acc:.4f}")
+    print(f"  Precision: {avg_prec:.4f}")
+    print(f"  Recall   : {avg_rec:.4f}")
+    print(f"  F1       : {avg_f1:.4f}")
+    print(f"  MCC      : {avg_mcc:.4f}")
 
-    # 与原始GCNMF-SDA对比（保留你原来的对比输出）
-    print(f"\n 与GCNMF-SDA对比:")
-    print(f"  GCNMF-SDA: AUC=0.9659, AUPR=0.9522")
-    print(f"  HGNN-SDA:    AUC={avg_auc:.4f}, AUPR={avg_aupr:.4f}")
+    # 与 GL4SDA 对比（使用论文 Table 3 的结果）
+    print(f"\n 与 GL4SDA 对比（同一数据集 / 指标）：")
+    print("  指标        GL4SDA      HGNN-SDA(本工作)")
+    print(f"  AUC      : 0.9080    {avg_auc:.4f}")
+    print(f"  Accuracy : 0.8460    {avg_acc:.4f}")
+    print(f"  Precision: 0.9200    {avg_prec:.4f}")
+    print(f"  Recall   : 0.7580    {avg_rec:.4f}")
+    print(f"  F1       : 0.8310    {avg_f1:.4f}")
+    print(f"  MCC      : 0.7030    {avg_mcc:.4f}")
 
 
 if __name__ == "__main__":

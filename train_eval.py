@@ -10,7 +10,16 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 from sklearn.model_selection import KFold
-from sklearn.metrics import roc_auc_score, average_precision_score
+from sklearn.metrics import (
+    roc_auc_score,
+    average_precision_score,
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    matthews_corrcoef,
+)
+
 from tqdm import tqdm
 import torch.nn as nn
 
@@ -181,7 +190,7 @@ def cross_validation(association_matrix, snorna_sim, disease_sim,
     """
     if hidden_dims is None:
         hidden_dims = [512, 384, 256, 128, 64]
-    
+
     print(f"\n[步骤 3] 开始 {n_splits} 折交叉验证...")
     print("=" * 80)
     print(f"  超图参数: k_snorna={k_snorna}, k_disease={k_disease}, "
@@ -294,7 +303,6 @@ def cross_validation(association_matrix, snorna_sim, disease_sim,
             use_neighbor=use_neighbor
         )
 
-
         # === 2.4 构建模型（输入特征也使用当前折的相似性矩阵 + 训练关联矩阵） ===
         model = TripleHypergraphNN(
             num_snorna=num_snorna,
@@ -362,14 +370,33 @@ def cross_validation(association_matrix, snorna_sim, disease_sim,
             test_pos, test_neg
         )
 
+        # ===== 通过阈值 0.5 把概率转成类别，用于计算 Accuracy / Precision / Recall / F1 / MCC =====
+        y_pred = (y_scores >= 0.5).astype(int)
+
+        acc = accuracy_score(y_true, y_pred)
+        prec = precision_score(y_true, y_pred, zero_division=0)
+        rec = recall_score(y_true, y_pred, zero_division=0)
+        f1 = f1_score(y_true, y_pred, zero_division=0)
+        mcc = matthews_corrcoef(y_true, y_pred)
+
         print(f"\nFold {fold + 1} 最终结果:")
-        print(f"  AUC:  {auc:.4f}")
-        print(f"  AUPR: {aupr:.4f}")
+        print(f"  AUC      : {auc:.4f}")
+        print(f"  AUPR     : {aupr:.4f}")
+        print(f"  Accuracy : {acc:.4f}")
+        print(f"  Precision: {prec:.4f}")
+        print(f"  Recall   : {rec:.4f}")
+        print(f"  F1       : {f1:.4f}")
+        print(f"  MCC      : {mcc:.4f}")
 
         fold_results.append({
             "fold": fold + 1,
             "auc": auc,
-            "aupr": aupr
+            "aupr": aupr,
+            "accuracy": acc,
+            "precision": prec,
+            "recall": rec,
+            "f1": f1,
+            "mcc": mcc
         })
 
         all_y_true.extend(y_true)
@@ -377,7 +404,8 @@ def cross_validation(association_matrix, snorna_sim, disease_sim,
         all_fold_predictions.append({
             "fold": fold + 1,
             "y_true": y_true,
-            "y_scores": y_scores
+            "y_scores": y_scores,
+            "y_pred": y_pred
         })
 
     return fold_results, np.array(all_y_true), np.array(all_y_scores), all_fold_predictions
@@ -433,7 +461,7 @@ def grid_search(
         use_neighbor_list = [True]
     if hidden_dims is None:
         hidden_dims = [512, 384, 256, 128, 64]
-    
+
     results = []
     best_config = None
     best_mean_aupr = -1.0
@@ -490,7 +518,8 @@ def grid_search(
                                         comb_id += 1
                                         print(f"\n>>> 组合 {comb_id}/{total_combinations}:")
                                         print(f"    k_snorna={k_s}, k_disease={k_d}, assoc_w={assoc_w}")
-                                        print(f"    kmeans: clusters={km_clusters}, min_size={km_min_size}, enabled={use_km}")
+                                        print(
+                                            f"    kmeans: clusters={km_clusters}, min_size={km_min_size}, enabled={use_km}")
                                         print(f"    neighbor: enabled={use_nb}")
 
                                         fold_results, all_y_true, all_y_scores, fold_predictions = cross_validation(
