@@ -44,7 +44,7 @@ def main():
     print(f"Total snoRNA with valid sequences: {len(seqs)}")
 
     # 3. 加载 RNAErnie
-    local_rnaernie_path = "/root/autodl-tmp/models/rnaernie"  # 按你实际解压路径填
+    local_rnaernie_path = "/root/autodl-tmp/models/rnaernie"
 
     tokenizer = RnaTokenizer.from_pretrained(local_rnaernie_path)
     model = RnaErnieModel.from_pretrained(local_rnaernie_path).to(device)

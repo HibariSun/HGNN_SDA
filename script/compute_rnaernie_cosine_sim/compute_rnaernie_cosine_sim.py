@@ -26,7 +26,6 @@ def main():
     print(f"Saved npy to {sim_npy_path}")
 
     # 5. 保存为 .csv
-    # 如果你有 sno_id 列表，也可以在这里加上行列名，这里先用纯数值矩阵
     sim_csv_path = os.path.join("data", "sno_rnaernie_cosine_sim.csv")
     df = pd.DataFrame(sim)
     df.to_csv(sim_csv_path, index=False, header=False)
